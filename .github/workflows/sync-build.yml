@@ -37,6 +37,34 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  sync-readme:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout deploy repo
+        uses: actions/checkout@v4
+
+      - name: Fetch upstream README
+        run: |
+          gh api repos/${{ env.UPSTREAM_REPO }}/contents/README.md \
+            --jq '.content' | base64 -d > README.md
+          echo "Fetched upstream README.md"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Commit README if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          if git diff --staged --quiet; then
+            echo "README unchanged."
+          else
+            git commit -m "docs: sync upstream README"
+            git push
+          fi
+
   build:
     needs: check
     if: needs.check.outputs.changed == 'true'
@@ -82,20 +110,11 @@ jobs:
         run: |
           echo "${{ needs.check.outputs.upstream_sha }}" > last-build.txt
 
-      - name: Sync upstream README
-        run: |
-          if [ -f upstream/README.md ]; then
-            cp upstream/README.md README.md
-            echo "Synced upstream README.md"
-          else
-            echo "Upstream has no README.md, skipping"
-          fi
-
-      - name: Commit build metadata
+      - name: Commit last-build.txt
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add last-build.txt README.md
+          git add last-build.txt
           if git diff --staged --quiet; then
             echo "No change to commit."
           else
