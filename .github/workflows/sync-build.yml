@@ -1,0 +1,88 @@
+name: Sync & Build workbuddy2api
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+env:
+  UPSTREAM_REPO: Sliverkiss/workbuddy2api
+  UPSTREAM_BRANCH: master
+  IMAGE_NAME: ghcr.io/viciy2023/wb2api-deploy
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.compare.outputs.changed }}
+      upstream_sha: ${{ steps.compare.outputs.upstream_sha }}
+    steps:
+      - name: Checkout deploy repo
+        uses: actions/checkout@v4
+
+      - name: Get upstream latest SHA
+        id: compare
+        run: |
+          UPSTREAM_SHA=$(gh api repos/${{ env.UPSTREAM_REPO }}/commits/${{ env.UPSTREAM_BRANCH }} --jq '.sha')
+          echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+          LAST_SHA=$(cat last-build.txt 2>/dev/null | tr -d '[:space:]' || echo "")
+          echo "last_sha=$LAST_SHA"
+          if [ "$UPSTREAM_SHA" = "$LAST_SHA" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No change detected, skipping build."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Change detected: $LAST_SHA -> $UPSTREAM_SHA"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build:
+    needs: check
+    if: needs.check.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout deploy repo
+        uses: actions/checkout@v4
+
+      - name: Clone upstream source
+        run: |
+          git clone --depth 1 --branch ${{ env.UPSTREAM_BRANCH }} https://github.com/${{ env.UPSTREAM_REPO }}.git upstream
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./upstream
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ needs.check.outputs.upstream_sha }}
+
+      - name: Record built SHA
+        run: |
+          echo "${{ needs.check.outputs.upstream_sha }}" > last-build.txt
+
+      - name: Commit last-build.txt
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add last-build.txt
+          if git diff --staged --quiet; then
+            echo "No change to commit."
+          else
+            git commit -m "build: ${{ needs.check.outputs.upstream_sha }}"
+            git push
+          fi
