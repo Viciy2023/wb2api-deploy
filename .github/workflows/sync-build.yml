@@ -82,11 +82,20 @@ jobs:
         run: |
           echo "${{ needs.check.outputs.upstream_sha }}" > last-build.txt
 
-      - name: Commit last-build.txt
+      - name: Sync upstream README
+        run: |
+          if [ -f upstream/README.md ]; then
+            cp upstream/README.md README.md
+            echo "Synced upstream README.md"
+          else
+            echo "Upstream has no README.md, skipping"
+          fi
+
+      - name: Commit build metadata
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add last-build.txt
+          git add last-build.txt README.md
           if git diff --staged --quiet; then
             echo "No change to commit."
           else
