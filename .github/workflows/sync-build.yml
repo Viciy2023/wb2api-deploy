@@ -52,6 +52,13 @@ jobs:
         run: |
           git clone --depth 1 --branch ${{ env.UPSTREAM_BRANCH }} https://github.com/${{ env.UPSTREAM_REPO }}.git upstream
 
+      - name: Prepare build config
+        run: |
+          if [ ! -f upstream/config.json ]; then
+            cp upstream/config.example.json upstream/config.json
+            echo "Created config.json from config.example.json (build-time placeholder)"
+          fi
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
