@@ -13,12 +13,34 @@ env:
 jobs:
   check:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       changed: ${{ steps.compare.outputs.changed }}
       upstream_sha: ${{ steps.compare.outputs.upstream_sha }}
     steps:
       - name: Checkout deploy repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync upstream README
+        run: |
+          gh api repos/${{ env.UPSTREAM_REPO }}/contents/README.md \
+            --jq '.content' | base64 -d > README.md
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          if git diff --staged --quiet; then
+            echo "README unchanged."
+          else
+            git commit -m "docs: sync upstream README"
+            git pull --rebase origin main
+            git push
+            echo "README synced."
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Get upstream latest SHA
         id: compare
@@ -37,34 +59,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  sync-readme:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout deploy repo
-        uses: actions/checkout@v4
-
-      - name: Fetch upstream README
-        run: |
-          gh api repos/${{ env.UPSTREAM_REPO }}/contents/README.md \
-            --jq '.content' | base64 -d > README.md
-          echo "Fetched upstream README.md"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Commit README if changed
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add README.md
-          if git diff --staged --quiet; then
-            echo "README unchanged."
-          else
-            git commit -m "docs: sync upstream README"
-            git push
-          fi
-
   build:
     needs: check
     if: needs.check.outputs.changed == 'true'
@@ -75,6 +69,8 @@ jobs:
     steps:
       - name: Checkout deploy repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Clone upstream source
         run: |
@@ -119,5 +115,6 @@ jobs:
             echo "No change to commit."
           else
             git commit -m "build: ${{ needs.check.outputs.upstream_sha }}"
+            git pull --rebase origin main
             git push
           fi
