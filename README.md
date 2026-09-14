@@ -164,6 +164,8 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `schedule.travel_enabled` | `true` | 猫猫旅行总开关（独立于签到） |
 | `schedule.activity_enabled` | `true` | 活跃上报总开关 |
 | `schedule.keepalive_enabled` | `true` | token 保活总开关 |
+| `global.enabled` | `true` | 国际版（global realm）路由开关；`false` = 显式关闭（逃生门：纯 CN 部署，即便 auth 写了 `realm=global` 也恒按 CN 处理） |
+| `global.chat_base` / `global.billing_base` | 空 | 国际版上游 base 覆盖；空 = 默认 `https://www.workbuddy.ai`（双域可分别覆盖） |
 | `upstream.timeout_seconds` | `120` | 短 RPC（刷新 / 签到 / 余额 / 模型列表）总时长上限 |
 | `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
@@ -197,6 +199,72 @@ curl -s http://localhost:7863/v1/chat/completions \
 加载顺序：JSON 文件 → `WB2A_*` 环境变量（变量非空才覆盖）：
 
 `WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_MAX_BODY_MB` · `WB2A_SOFT_RATE`(duration) · `WB2A_SOFT_RATE_MAX`(duration) · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS` · `WB2A_USER_AGENT` · `WB2A_SANITIZE_FINGERPRINTS`(bool) · `WB2A_PROMPT_MODE` · `WB2A_PROMPT_FILE`
+
+## 国际版账号（Global Realm）
+
+网关同时支持国内版（CN，`copilot.tencent.com` / `www.codebuddy.cn`）与国际版（Global，`www.workbuddy.ai`）账号。两条轨道共享同一个账号池，由账号的 `realm` 或请求的模型名前缀决定路由。
+
+### 登录：交互式选域
+
+`./login.sh` 无参数运行时**交互式选择登录版本**（1 国内版 / 2 国际版，回车默认国内版）；非交互（管道 / cron）回落 cn。传参优先：
+
+```bash
+./login.sh --realm=global   # 直达国际版
+./login.sh --realm=cn       # 直达国内版
+```
+
+auth 文件落盘时写入 `realm` 键（嵌套形 `auth.realm`）；历史 CN 凭证不带该键 → 自动按空值回落 CN，零迁移。
+
+**`--realm=global` 登录后自动注册激活 + trial 领取**：token 落盘后 login.sh 会依次执行（失败只提示不阻断登录，token 已落盘）：
+
+1. **注册激活**：`GET https://www.workbuddy.ai/auth/realms/copilot/overseas/user/register?userId=<uid>`
+   - `code=200`：成功（已激活 / 新激活，幂等）
+   - `code=500 "register region required"`：**自动完善注册地区**（无需打开网页）——终端列出可选地区（内置国际版白名单 `香港/澳门/新加坡/泰国/菲律宾/马来西亚/印尼`，若检测到当前地区则高亮），用户输入编号后自动提交：
+     - 拉地区列表：`POST /billing/area/get-country-code`
+     - 提交地区：`POST /console/login/account`（body `{attributes:{countryCode, countryFullName, countryName}}`）
+     - 重新 `register` 验证 `code=200`
+2. **trial 领取**：`POST https://www.workbuddy.ai/billing/ide/trial`
+   - `code=14051` = 已领取过（幂等，不算失败）；成功输出「国际版 trial 已激活，可以开始对话」
+
+> 新 global 账号必须先完成区注册再调 register 激活 trial，chat 才不报 `14017 trial not activated`；`11140 request illegal` 是账号级授权风控，触发后重新 OAuth 登录（`login.sh`）即可恢复。
+
+### 模型名前缀协议
+
+请求 `model` 支持 `[realm:]model` 语法（小写）：
+
+- `cn:glm-5.2` → 只在 CN 账号里选号、走 CN 上游
+- `global:gpt-5.4` → 只在国际版账号里选号、走 Global 上游（`/console/chat/completions`，404/405 时回落 `/v2/chat/completions`）
+- 裸名（无前缀，如 `deepseek-v4-flash`）→ 默认 CN（零回归；存量客户端行为不变）
+
+`GET /v1/models` 输出的 CN 模型名带 `cn:` 前缀、Global 模型名带 `global:` 前缀；客户端从列表拿名原样回填即显式选域。**发往上游的 body 里是剥离前缀后的裸模型名**（上游不认识 `cn:` / `global:`）。
+
+### global.enabled 配置
+
+`global.enabled` 默认 **true**（国际版路由开启）。显式设 **false** 为逃生门：纯 CN 部署，即便 auth 文件写了 `realm=global` 或 domain 为 `www.workbuddy.ai` 也恒按 CN 处理（路由与任务门控同步关闭）。
+
+> ⚠️ **逃生门守则**：`global.enabled=false` 时，`auth.Realm()` 恒返回 `cn`——auths/ 里残留的 global 凭证会被**降级按 CN 处理**并打向 CN 端点（chat 走 codebuddy.cn、调度器把它们当 CN 跑签到/旅行/活跃、`cmd/credit`/`scripts/*.py` 也按 CN 单域发起）。**若混布 global 号又关逃生门，属于配置错误**：逃生门唯一语义是「纯 CN 部署锁死一切」；关闭前请把 `realm=global` 的 auth 文件移出 `auths/`（或将 `global.enabled` 恢复 true）。
+
+### Global 账号行为差异
+
+| 行为 | CN 账号 | Global 账号 |
+|---|---|---|
+| 定时签到 / 活跃上报 / 猫猫旅行 | 照常 | **全部跳过**（无签到体系 / 任务中心；调度器直接过滤，不发起任何上游调用，避免风控） |
+| token 保活 | 刷新 | **照常刷新**（Global 的 refresh 端点存在） |
+| 积分增益 | 签到 + 旅行 + 活跃 + 任务中心 | 仅一次性 **trial 加油包**（见下） |
+| 模型目录 | 动态拉取 + 静态表 | `fetchGlobalModels` 探测（console → `/v2/models` 家族）+ 内置名单兜底，只产模型名不产倍率 |
+
+国际版账号手动补签 / 任务保护：`./signin.sh` 对「今天已签到」（`code=10001`）与「未开启 / 已过期 / inactive」类业务码判为幂等（不看做失败）；global 账号即便绕过调度器手动触发也只会得到「不适用」而非报错。
+
+### trial 加油包
+
+```bash
+./trial.sh            # 对 auths 下全部 global 账号领取一次性 trial 加油包
+./trial.sh auths_dir  # 指定 auths 目录
+```
+
+- 仅在 **Global** 账号上执行 `POST /billing/ide/trial`；CN 账号明确提示 `N/A not applicable`，不发任何请求
+- `code=14051`（已领取过）= 幂等成功，状态显示 `ALREADY`，不算失败
+- 这是 Global 账号唯一天然的积分增益动作
 
 ## 核心行为语义
 
@@ -233,6 +301,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 | Session 失效 | body 含 `Offline user session not found` / `12153` | **连续 3 次**才永久禁用（一次 12153 多为临时抖动：网络 / 闪断 / refresh 竞态）；刷新成功 / 任意成功 / 手工复活清计数 | 人工重新登录（`login.sh`）或 `ReviveDisabled` 复活 |
 | 上游 404 | HTTP 404 | 软冷却固定 60s（不随 `soft_rate`、不单独退避） | 到期自动恢复 |
 | 服务端错误 | HTTP ≥500 | 喂连续失败计数，达阈值熔断 | 熔断到期 / 成功清零 |
+| 账号级故障 | HTTP 403 + `request illegal`（11140）/ `trial not activated`（14017） | 软冷却 `soft_rate`（与 429 同路径，账号级授权/配额故障：11140 = auth 风控需重登，14017 = register 未完成试用未激活） | 到期自动恢复 / 重新 OAuth 登录 |
 | 请求体解析失败 | HTTP 400 + `Unmarshal chat params failed` / code `11101` | **不罚账号，但仍轮转**（客户端畸形 JSON，换号照样 400） | 即时 |
 | 内容拦截 | HTTP 400 + 审核文案 | **不罚账号**，`passthrough` 模式走降级重试 | 即时 |
 | 客户端错误 | 其余 4xx / 业务 `code≠0` | 不处罚，换号重试 | 即时 |
@@ -279,10 +348,10 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 | 任务 | 开关（默认 true） | 时刻（默认） | 行为 |
 |---|---|---|---|
-| 签到 | `schedule.checkin_enabled` | `checkin_hours` `[9, 21]` 整点 | 签到 + 余额查询；余额恢复则解冻冷却账号 |
-| 活跃上报 | `schedule.activity_enabled` | `activity_hours` `[10]` 整点 | 对话活跃上报（`chat_request_send` 事件，必须含 `userId`）；点亮连登 + 解锁 `first_buddy`；每号每天 1 次 |
-| 猫猫旅行 | `schedule.travel_enabled` | `travel_hours` `[9, 21]` 整点 | 独立排程：无猫领养 / `idle` 派出 / `arrived` 领奖 |
-| 保活 | `schedule.keepalive_enabled` | `keepalive_hours` `[22]` 整点 | 全账号刷新 token；session 失效**连续 3 次**才自动禁用 |
+| 签到 | `schedule.checkin_enabled` | `checkin_hours` `[9, 21]` 整点 | 签到 + 余额查询；余额恢复则解冻冷却账号。**Global 账号跳过**（无签到体系，见「国际版账号」） |
+| 活跃上报 | `schedule.activity_enabled` | `activity_hours` `[10]` 整点 | 对话活跃上报（`chat_request_send` 事件，必须含 `userId`）；点亮连登 + 解锁 `first_buddy`；每号每天 1 次。**Global 账号跳过** |
+| 猫猫旅行 | `schedule.travel_enabled` | `travel_hours` `[9, 21]` 整点 | 独立排程：无猫领养 / `idle` 派出 / `arrived` 领奖。**Global 账号跳过** |
+| 保活 | `schedule.keepalive_enabled` | `keepalive_hours` `[22]` 整点 | 全账号刷新 token（Global 账号照常）；session 失效**连续 3 次**才自动禁用 |
 
 **关闭定时任务**：用 `schedule.*_enabled: false` 显式关闭（四个都设 `false` 则调度器不空转，直接阻塞等待退出信号）。注意两点语义：
 
@@ -300,6 +369,11 @@ curl -s http://localhost:7863/v1/chat/completions \
 - 限速：账号间间隔 800ms（与旅行同口径）
 - **streak 自检**：上报成功后回读连登天数（只读 oracle），日志每号一行可 grep：`activity <uid>: streak days=N`。`days=0` 记 **warn**（`report OK but streak.days=0 (silent drop?)`，对应上游「200 但静默丢弃」）；回读失败记 warn 但不影响主流程（上报按天幂等，不重试，只观测）
 - 手动诊断 / 补跑用 `python3 scripts/task_runner.py`（成长任务一体机：查询/完成/领奖；默认 dry-run，写操作需 `--yes`）
+
+> **`scripts/` 任务脚本仅适用 CN 账号**：`task_runner.py` / `school_open_day_2026.py` / `school_open_day_cron.sh`
+> 面向国内版任务中心/开学季活动，端点为 `copilot.tencent.com` / `codebuddy.cn`。一旦 `auths/` 混入
+> `realm=global` 账号，脚本会打印 `[skip] <uid8> global realm 不适用 CN 任务` 并跳过该号（不发起任何请求）；
+> 纯 global 部署请勿直接跑这些脚本（全球版无任务中心），积分增益只看 `./credit.sh` 与一次性 `./trial.sh`。
 
 #### 猫猫旅行（独立排程）
 
@@ -325,18 +399,24 @@ curl -s http://localhost:7863/v1/chat/completions \
 |---|---|---|
 | `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式 / 非流式；请求体上限 `server.max_body_mb`（默认 8 MB） |
 | `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（动态拉取，缓存 1h；失败回落静态表 + 5min 负缓存） |
-| `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分 / 冷却 / 熔断 / 在途 / 粘性；disabled 账号透出 `disabled_reason`） |
-| `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |
+| `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分 / 冷却 / 熔断 / 在途 / 粘性；disabled 账号透出 `disabled_reason`）；顶层 `realm_totals` 按域（`cn`/`global`）分组的计数汇总 |
+| `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识与外层由 `realm_servable` 独立暴露的 CN/global 可达性（见下） |
 
 > 鉴权规则：仅当 `api_key` 非空才校验 `Authorization: Bearer <api_key>`；**`api_key` 为空时上述端点直接放行**；`/healthz` 恒无鉴权。
 
 `/healthz` 响应示例（200 / 503 同结构，仅状态码与计数变化）：
 
 ```json
-{"healthy": 2, "total": 3, "service": "workbuddy2api"}
+{"healthy": 2, "total": 3, "service": "workbuddy2api", "realm_servable": {"cn": true, "global": false}}
 ```
 
-响应同时带 `X-Service: workbuddy2api` 头。这两个身份标识用于区分**本网关**与同端口上可能残留的其他服务——对方即使返回 2xx 也不会带该字段 / 头，宿主探测据此避免"假成功"。
+`realm_servable` 是**观测字段，不参与判活**：HTTP 状态码仍由存在性语义决定（任一域有 healthy 且未占满账号即 200），`realm_servable` 只是对外暴露 CN / global 各自可达性——双域部署下给监控配「任一域单独不可用即告警」，而不是只看整体 HTTP 码。响应同时带 `X-Service: workbuddy2api` 头。这两个身份标识用于区分**本网关**与同端口上可能残留的其他服务——对方即使返回 2xx 也不会带该字段 / 头，宿主探测据此避免"假成功"。
+
+`/status` 的 `realm_totals` 形状（各域含 `total/healthy/cooling/disabled/in_flight_full`，与顶层汇总键一致）：
+
+```json
+{"realm_totals": {"cn": {"total": 5, "healthy": 4, "cooling": 1, "disabled": 0, "in_flight_full": 0}, "global": {"total": 3, "healthy": 1, "cooling": 2, "disabled": 0, "in_flight_full": 1}}}
+```
 
 **宿主健康探测指引**：强校验（推荐）用 `/status` + `api_key`——只有持有正确 `api_key` 的本网关返回 200，其他服务返回 401 / 404；弱校验（不适合持 key 的负载均衡器）用 `/healthz` + `service` 字段判据（`/healthz` 恒无鉴权，`service == "workbuddy2api"` 才算命中本网关）。容器自带 `HEALTHCHECK` 用的就是弱校验（仅进程内自检，够用）。
 
@@ -371,6 +451,9 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `activity/growth/buddy/travel/depart` | POST | 猫猫旅行：派出 |
 | `activity/growth/buddy/travel/claim` | POST | 猫猫旅行：领奖 |
 | `activity/growth/streak` | GET | 连登天数（只读 oracle，活跃自检用） |
+| `billing/ide/trial` | POST | 国际版一次性 trial 加油包（仅 global 账号；`14051`=已领幂等） |
+
+国际版（`realm=global`）出站走 `https://www.workbuddy.ai`（可被 `global.chat_base` / `global.billing_base` 覆盖）：聊天用 `/console/chat/completions`（404/405 回落 `/v2/chat/completions`），billing 用 `/billing/meter/*`（404 回落 `/v2/billing/meter/*`）。
 
 出站请求统一携带 `CLI/2.63.2 CodeBuddy/2.63.2` UA（可被 `upstream.user_agent` 覆盖）；聊天请求带账号头（`X-User-Id` 等），**永不携带 `X-Refresh-Token`**（该头只出现在 token 刷新请求）。
 
@@ -412,12 +495,23 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 | 脚本 | 用途 |
 |---|---|
-| `./login.sh` | OAuth 登录 → 落盘 auth → 重启容器 |
-| `./signin.sh [auths_dir]` | 批量签到（过期先刷新） |
-| `./credit.sh` / `./credit.sh -json` | 积分日报（美化 / 原始 JSON） |
+| `./login.sh [--realm=cn\|global]` | OAuth 登录（无参数交互式选域）→ 落盘 auth → 重启容器 |
+| `./signin.sh [auths_dir]` | 批量签到（过期先刷新；「已签到 / 未开启 / 已过期 / inactive」判幂等不算失败） |
+| `./credit.sh` / `./credit.sh -json` | 积分日报（美化 / 原始 JSON）；realm 感知——global 账号查积分走 `workbuddy.ai`（`/billing/meter/*` 404 回落 `/v2`），CN 账号维持 `codebuddy.cn` |
+| `./trial.sh [auths_dir]` | 国际版 trial 加油包领取（仅 global 账号；`14051`=已领幂等）；镜像内置 `/app/trial_bin`，容器内零 go 构建直接跑（见下「容器内工具」） |
 | `python3 scripts/task_runner.py ALL` | 成长任务查询（默认 dry-run 只展示）；`--yes` 全量完成并领奖，`--only <task_code>` 指定单个任务，`--only-claim` 只领奖不点亮 |
 
 二进制不在 git 中：脚本首次使用自动 `go build` 对应 `cmd/*`（Docker 镜像内已预编译）。
+
+**容器内工具**（镜像内置 `/app/wb2api`、`signin_bin`、`login`、`credit`、`trial_bin`、`activity_bin`，无 go 工具链可直接执行；脚本自动复用预置产物、不重复构建）：
+
+```bash
+docker exec -w /app workbuddy2api ./trial.sh           # 镜像内置 trial_bin，零构建
+docker exec -w /app workbuddy2api ./signin.sh
+docker exec -w /app workbuddy2api /app/activity_bin   # 活跃上报一次性触发（等价 cmd/activity）
+```
+
+`trial.sh` 的二进制解析优先序：`/app/trial_bin`（容器内预置）→ `$CACHE_DIR` 缓存 → 源码更新则 `go build`；无 go 且无预置产物时明确报错提示。
 
 ### 账号管理
 
