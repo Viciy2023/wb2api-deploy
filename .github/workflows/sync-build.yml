@@ -10,10 +10,10 @@ env:
   UPSTREAM_REPO: Sliverkiss/workbuddy2api
   UPSTREAM_BRANCH: master
   IMAGE_NAME: ghcr.io/viciy2023/wb2api-deploy
-  # 构建修订号：仅当下游构建逻辑（如 Dockerfile 补丁、构建参数）变化时递增。
-  # 它参与 last-build.txt 的指纹比对，因此改这里即可强制重建一次，
-  # 无需等上游出新提交。当前 v2 = Dockerfile 补丁「整目录 COPY scripts」。
-  BUILD_REV: v2
+  # 构建修订号：仅当下游构建逻辑变化时递增。
+  # 它参与 last-build.txt 的指纹比对，改这里即可强制重建一次。
+  # v3: 不再补丁 Dockerfile，直接使用上游已修复的版本。
+  BUILD_REV: v3
 
 jobs:
   check:
@@ -83,34 +83,6 @@ jobs:
       - name: Clone upstream source
         run: |
           git clone --depth 1 --branch ${{ env.UPSTREAM_BRANCH }} https://github.com/${{ env.UPSTREAM_REPO }}.git upstream
-
-      # 上游 Dockerfile 只 COPY scripts/global_region.py，导致 school/cat 定时任务
-      # （scheduler 调用 python3 scripts/school_open_day_2026.py 与 task_runner.py）
-      # 在容器内缺脚本、每轮只报 WARN。此处把整目录打进镜像，脚本随镜像自动更新，
-      # 部署侧不再需要 bind mount ./scripts。
-      - name: Patch Dockerfile to bundle all scripts
-        run: |
-          set -euo pipefail
-          DF=upstream/Dockerfile
-          cp "$DF" "$DF.orig"
-          # 仅在仍是「单文件 COPY」形态时替换；已整目录则原样保留。
-          if grep -q '^COPY scripts/ /app/scripts/' "$DF"; then
-            echo "Upstream already bundles the whole scripts/ dir; nothing to patch."
-          else
-            sed -i 's|^COPY scripts/global_region\.py /app/scripts/global_region\.py$|COPY scripts/ /app/scripts/|' "$DF"
-          fi
-          # 硬校验：必须以整目录 COPY 收尾，否则 fail fast（宁可构建失败留旧镜像，
-          # 也不要静默产出缺脚本的镜像）。
-          if ! grep -q '^COPY scripts/ /app/scripts/' "$DF"; then
-            echo "::error::Dockerfile patch failed — upstream COPY scripts line changed format."
-            echo "--- diff (orig -> patched) ---"
-            diff "$DF.orig" "$DF" || true
-            exit 1
-          fi
-          echo "--- diff (orig -> patched) ---"
-          diff "$DF.orig" "$DF" || true
-          echo "--- COPY lines in final Dockerfile ---"
-          grep -n '^COPY' "$DF"
 
       - name: Prepare build config
         run: |
