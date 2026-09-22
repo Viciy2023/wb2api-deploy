@@ -26,7 +26,8 @@ env:
   # 构建修订号：仅当下游构建逻辑变化时递增。
   # 它参与 last-build.txt 的指纹比对，改这里即可强制重建一次。
   # v3: 不再补丁 Dockerfile，直接使用上游已修复的版本。
-  BUILD_REV: v3
+  BUILD_REV: v4
+  # 递增说明：构建产物增加了 Docker Hub 目标（ccy2026/wb2api）。
 
 jobs:
   check:
