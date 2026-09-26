@@ -5,9 +5,9 @@
 ## 工作流程
 
 ```
-上游 Sliverkiss/workbuddy2api 更新
+上游 HanawaBanana/workbuddy2api 更新
         ↓
-每天 03:00 定时任务：GitHub API 对比上游最新 commit SHA
+每 4 小时定时任务（UTC 00/04/08/12/16/20）：GitHub API 对比上游最新 commit SHA
         ↓ 有变化
 clone 上游源码 → 构建镜像 → 推送 ghcr.io/viciy2023/wb2api-deploy:latest
         ↓
