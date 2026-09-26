@@ -9,17 +9,16 @@ name: Sync & Build workbuddy2api
 # 走国内加速源。
 #
 # 命名跟惯例对齐：<用户名>/<镜像名>:<标签>，一个服务占一个仓库。
-#
-# ⚠️ 2026-09 状态：上游 Sliverkiss/workbuddy2api 已删库（GitHub API 返回 404），
-#    定时比对上游 commit + clone 上游源码的自动链路随之失效。故删除 schedule
-#    定时触发，本工作流只保留手动触发（workflow_dispatch）；仓库已归档，
-#    除手动点按钮外不会再自行运行。文件全部保留，仅停用自动触发。
 
 on:
+  schedule:
+    # 每 4 小时一次；UTC 00/04/08/12/16/20 = 北京 08/12/16/20/00/04 点
+    - cron: '0 0,4,8,12,16,20 * * *'
   workflow_dispatch:
 
 env:
-  UPSTREAM_REPO: Sliverkiss/workbuddy2api
+  # 上游原为 Sliverkiss/workbuddy2api（已删库，API 返回 404），改用其延续仓库。
+  UPSTREAM_REPO: HanawaBanana/workbuddy2api
   UPSTREAM_BRANCH: master
   IMAGE_NAME: ghcr.io/viciy2023/wb2api-deploy
   # Docker Hub 上的仓库名。完整镜像名是 <DOCKERHUB_USERNAME>/workbuddy2api。
